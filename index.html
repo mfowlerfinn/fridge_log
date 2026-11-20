@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Fridge">
+<title>Fridge log viewer</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  /* Instrument-console theme: always dark, like a control-room display. */
+  :root {
+    color-scheme: dark;
+    --bg:#0a0e14; --panel:#111821; --panel-2:#0d131b; --text:#e6edf3; --muted:#8b98a8; --faint:#5a6676;
+    --line:#1f2a37; --grid:#1a2430; --accent:#38bdf8; --accent-dim:rgba(56,189,248,.14);
+    --good:#0ca30c; --cold:#3987e5;
+    --mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; font:13px/1.45 -apple-system, system-ui, sans-serif; color:var(--text);
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 32px 32px,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 32px 32px,
+      radial-gradient(ellipse at top, #0f1a26 0%, var(--bg) 70%);
+    background-color: var(--bg); min-height:100vh;
+  }
+  header { position:sticky; top:0; z-index:10; background:rgba(10,14,20,.92); backdrop-filter:blur(8px);
+           border-bottom:1px solid var(--line); padding:12px 20px 14px; display:grid; gap:12px; }
+  .bar { display:flex; flex-wrap:wrap; gap:18px; align-items:center; }
+  .brand { display:flex; align-items:center; gap:10px; margin-right:12px; }
+  .brand h1 { font:600 14px/1 var(--mono); letter-spacing:.18em; text-transform:uppercase; margin:0; }
+  .brand small { display:block; font:11px/1 var(--mono); color:var(--muted); letter-spacing:.12em; margin-top:4px; }
+  .led { width:9px; height:9px; border-radius:50%; background:var(--accent); box-shadow:0 0 8px var(--accent);
+         animation:pulse 2s ease-in-out infinite; flex:none; }
+  .led.off { background:var(--faint); box-shadow:none; animation:none; }
+  @keyframes pulse { 50% { opacity:.35; } }
+  .group { display:flex; gap:8px; align-items:center; }
+  .label { font:11px/1 var(--mono); color:var(--muted); letter-spacing:.12em; text-transform:uppercase; }
+  .seg { display:flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .seg button { border:0; border-radius:0; border-right:1px solid var(--line); }
+  .seg button:last-child { border-right:0; }
+  button { white-space:nowrap; font:12px/1 var(--mono); padding:7px 11px; border:1px solid var(--line); border-radius:6px;
+           background:var(--panel-2); color:var(--muted); cursor:pointer; transition:color .15s, background .15s; }
+  button:hover { color:var(--text); background:#16202b; }
+  button.on { color:var(--accent); background:var(--accent-dim); }
+  select { font:12px/1.5 var(--mono); background:var(--panel-2); color:var(--text);
+           border:1px solid var(--line); border-radius:6px; padding:2px; outline:none; }
+  select option:checked { background:var(--accent-dim); color:var(--accent); }
+  #files { min-width:230px; }
+  .right { margin-left:auto; text-align:right; font:12px/1.5 var(--mono); color:var(--muted); }
+  #clock { font:600 18px/1 var(--mono); color:var(--text); letter-spacing:.06em; }
+
+  /* Dew-point status panel */
+  #dew { display:flex; align-items:center; gap:14px; padding:10px 16px; border-radius:8px;
+         border:1px solid var(--line); background:var(--panel); --c:var(--faint); border-left:4px solid var(--c); }
+  #dew.ok { --c:var(--good); background:linear-gradient(90deg, rgba(12,163,12,.16), var(--panel) 60%); }
+  #dew.cold { --c:var(--cold); background:linear-gradient(90deg, rgba(57,135,229,.18), var(--panel) 60%); }
+  #dew .led { background:var(--c); box-shadow:0 0 12px var(--c); width:12px; height:12px; animation:none; }
+  #dew-title { font:700 15px/1 var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--text); }
+  #dew-detail { font:12px/1.3 var(--mono); color:var(--muted); }
+
+  main { padding:16px 20px 28px; display:grid; gap:14px; }
+  .card { background:linear-gradient(180deg, var(--panel), var(--panel-2)); border:1px solid var(--line);
+          border-radius:10px; padding:12px 14px; box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 8px 24px rgba(0,0,0,.25); }
+  .card-head { display:flex; align-items:center; gap:10px; }
+  .card-head h2 { font:600 12px/1 var(--mono); letter-spacing:.16em; text-transform:uppercase; margin:0; color:var(--text); }
+  .card-head h2 .unit { color:var(--muted); font-weight:400; margin-left:6px; text-transform:none; letter-spacing:.04em; }
+  .card-head .spacer { flex:1; }
+  .min-btn { width:28px; padding:6px 0; }
+  /* tiles grow to fit their name and value (min 118px), wrapping onto new rows as needed */
+  .tiles { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .tiles .tile { flex:0 0 auto; min-width:118px; }
+  .tile .val { white-space:nowrap; }
+  .tile { background:rgba(0,0,0,.25); border:1px solid var(--line); border-radius:7px; padding:8px 10px; }
+  .tile .name { display:flex; align-items:center; gap:6px; font:10.5px/1 var(--mono); color:var(--muted);
+                letter-spacing:.06em; text-transform:uppercase; white-space:nowrap; }
+  .tile .sw { width:10px; height:3px; border-radius:2px; flex:none; }
+  .tile .val { font:600 19px/1 var(--mono); margin-top:8px; color:var(--text); font-variant-numeric:tabular-nums; }
+  .tile .val small { font-size:11px; color:var(--muted); font-weight:400; margin-left:3px; }
+  .tile { cursor:pointer; user-select:none; transition:opacity .15s, border-color .15s; }
+  .tile:hover { border-color:#2c3a4a; }
+  .tile.off { opacity:.4; }
+  .tile.off .sw { background:transparent !important; outline:1px solid var(--faint); }
+  .tile.cold { border-color:rgba(57,135,229,.6); }
+  .plot { height:340px; margin-top:8px; }
+  .card.min .plot { display:none; }
+  .card.min .tiles { margin-top:10px; }
+  .empty { font:13px var(--mono); color:var(--muted); }
+
+  /* Phones: one column, compact header (only the status panel stays pinned), 2-up tiles, shorter plots */
+  @media (max-width: 640px) {
+    /* header stays sticky, but pinned at -(controls height) by pinStatus(): the controls scroll away, the status panel stays */
+    header { padding:10px 12px 10px; padding-top:max(10px, env(safe-area-inset-top)); gap:10px; }
+    /* controls in a fixed grid so nothing wraps or spills:
+         brand  | clock
+         status line (one line, cut with …)
+         window buttons | Live
+         file list (one line) */
+    .bar { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:8px 10px;
+           grid-template-areas:"brand clock" "status status" "ranges auto" "files files"; }
+    .brand { grid-area:brand; margin-right:0; min-width:0; }
+    .brand h1 { font-size:13px; letter-spacing:.12em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .brand > div { min-width:0; }
+    .brand small { display:none; }
+    .right { display:contents; }
+    #clock { grid-area:clock; font-size:16px; align-self:center; }
+    #status { grid-area:status; font-size:10.5px; text-align:left; min-width:0;
+              white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .group:has(#ranges) { grid-area:ranges; min-width:0; }
+    #ranges { flex:1; min-width:0; }
+    #ranges button { flex:1; min-width:0; padding:10px 4px; }
+    .group:has(#auto) { grid-area:auto; }
+    #reload { display:none; }                                    /* Live already reloads every 30 s */
+    .group:has(#files) { grid-area:files; min-width:0; }
+    #files { min-width:0; width:100%; flex:1; }                  /* one row (size=1); tap to pick */
+    .bar .label { display:none; }
+    button { padding:10px 12px; }                                /* bigger touch targets */
+    #dew { padding:10px 12px; gap:12px; }
+    #dew-title { font-size:13.5px; letter-spacing:.1em; }
+    #dew-detail { font-size:11px; }
+    main { padding:12px 10px 24px; padding-bottom:max(24px, env(safe-area-inset-bottom)); gap:12px; }
+    .card { padding:10px; }
+    .tiles { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:6px; }
+    .tiles .tile { min-width:0; }
+    .tile .val { font-size:17px; }
+    .plot { height:260px; touch-action:pan-y; }  /* swipe scrolls the page; no browser double-tap zoom */
+    .min-btn { width:36px; padding:8px 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand"><span class="led" id="live"></span>
+      <div><h1>Fridge Monitor</h1><small>Log viewer · read-only</small></div></div>
+    <div class="group">
+      <span class="label">Files</span>
+      <select id="files" multiple title="Cmd/Shift-click to pick several days"></select>
+    </div>
+    <div class="group">
+      <span class="label">Window</span>
+      <div class="seg" id="ranges">
+        <button data-h="1">1 h</button><button data-h="6">6 h</button><button data-h="24" class="on">24 h</button><button data-h="0">All</button>
+      </div>
+    </div>
+    <div class="group">
+      <button id="auto" class="on" title="Reload the data every 30 s">● Live</button>
+      <button id="reload">Reload</button>
+    </div>
+    <div class="right"><div id="clock"></div><div id="status"></div></div>
+  </div>
+  <div id="dew"><span class="led"></span><div><div id="dew-title">Waiting for data</div><div id="dew-detail"></div></div></div>
+</header>
+<main id="plots"></main>
+
+<script>
+// Which plot each CSV column goes on (fridge_logger.py names, plus the older temp_/pressure_ names).
+const GROUPS = [
+  { id:'temp', title:'Temperatures', unit:'K', log:true,
+    match: n => /plate|magnet$|^temp_/i.test(n) && !/magnetic/i.test(n) },
+  { id:'pres', title:'Pressures', unit:'mbar', log:true, collapsible:true, sci:true,
+    match: n => /^pressure_|^P\d+$|side|^compressor$|tank|ovc/i.test(n) },
+  { id:'field', title:'Magnetic field', unit:'T', log:false, collapsible:true,
+    match: n => /magnetic/i.test(n) },
+  // MXC_dT/dt only feeds the status bar; it gets no plot.
+  { id:'other', title:'Other', unit:'', log:false, collapsible:true, match: n => n !== RATE_COL },
+];
+const REFRESH_MS = 30000;
+// Older logs used channel ids; map them to the names fridge_logger.py writes now
+// (keep in step with TEMP_COLUMNS / PRESSURE_COLUMNS there).
+const ALIASES = {
+  temp_CH1:'50K_Plate', temp_CH2:'4K_Plate', temp_CH3:'Still_Plate', temp_CH5:'Cold_plate',
+  temp_CH6:'MXC_Plate', temp_CH7:'Magnet',
+  pressure_P1:'Low_Side', pressure_P2:'P2', pressure_P3:'High_Side', pressure_P4:'Compressor',
+  pressure_P5:'Tank', pressure_P6:'OVC', pressure_P7:'P7',
+};
+
+let hours = 24, autoTimer = null, data = null;
+const $ = id => document.getElementById(id);
+// Minimized plots, remembered in this browser between visits.
+// Default: everything but the temperatures starts minimized.
+const minimized = new Set(JSON.parse(localStorage.getItem('minimized') || '["pres","field","other"]'));
+
+// Room dew point the fridge temperatures are compared against, in kelvin.
+const DEW_K = 285;
+// Channels left out of the dew-point check (MXC sensor reads low near room temperature).
+const DEW_SKIP = ['MXC_Plate'];
+
+// Warming/cooling trend, from the MXC_dT/dt column fridge_logger.py writes (K/h, 15-min least-squares slope).
+const TREND_CH = 'MXC_Plate', RATE_COL = 'MXC_dT/dt';
+// "Steady" = changing by less than 1 % of the temperature per hour, or 3 steps of the
+// logged resolution per hour (the logger keeps 3 significant figures), whichever is larger.
+const STEADY_REL_PER_H = 0.01, STEADY_STEPS_PER_H = 3;
+// Only call it base temperature if MXC is steady below this (so a plateau mid-cooldown doesn't count).
+const BASE_MAX_K = 1;
+
+// Latest MXC temperature and its logged rate; state 'unknown' if that row has no rate (e.g. older logs).
+function mxcTrend() {
+  const ys = data.cols[TREND_CH], rs = data.cols[RATE_COL] || [];
+  if (!ys) return null;
+  let i = ys.length - 1;
+  while (i >= 0 && ys[i] === null) i--;
+  if (i < 0) return null;
+  const T = ys[i], rate = rs[i];
+  if (rate === null || rate === undefined || Number.isNaN(rate)) return { T, state: 'unknown' };
+  const step = 10 ** (Math.floor(Math.log10(Math.abs(T) || 1)) - 2);
+  const steady = Math.max(STEADY_REL_PER_H * Math.abs(T), STEADY_STEPS_PER_H * step);
+  return { T, rate, state: Math.abs(rate) <= steady ? 'steady' : rate > 0 ? 'warming' : 'cooling' };
+}
+
+function fmtRate(r) {
+  const a = Math.abs(r), sign = r > 0 ? '+' : '−';
+  if (a < 1e-5) return '0 K/h';  // below 0.01 mK/h: flat
+  return a < 1 ? `${sign}${+(a * 1e3).toPrecision(2)} mK/h` : `${sign}${+a.toPrecision(2)} K/h`;
+}
+// Series colours (validated dark-surface categorical palette), assigned in column order, never cycled past 8.
+// Channels whose trace is switched off (click a tile), remembered in this browser.
+const hiddenTraces = new Set(JSON.parse(localStorage.getItem('hiddenTraces') || '[]'));
+const PALETTE = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#0ca30c', '#9085e9', '#e66767'];
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const header = lines[0].split(',').map(n => ALIASES[n] || n);
+  const rows = lines.slice(1).map(l => l.split(','));
+  return { header, rows };
+}
+
+// Merge several files by column name, sorted by time.
+function merge(parsed) {
+  const cols = {}, times = [];
+  const names = [];
+  parsed.forEach(p => p.header.slice(1).forEach(n => { if (!names.includes(n)) names.push(n); }));
+  names.forEach(n => cols[n] = []);
+  const all = [];
+  parsed.forEach(p => p.rows.forEach(r => {
+    const rec = { t: r[0] };
+    p.header.forEach((n, i) => { if (i) rec[n] = r[i]; });
+    all.push(rec);
+  }));
+  all.sort((a, b) => a.t < b.t ? -1 : a.t > b.t ? 1 : 0);
+  // the 24 h file repeats rows from the daily files: keep one row per timestamp
+  all.filter((rec, i) => i === 0 || rec.t !== all[i - 1].t).forEach(rec => {
+    times.push(rec.t);
+    names.forEach(n => {
+      const v = rec[n];
+      cols[n].push(v === undefined || v === '' ? null : Number(v));
+    });
+  });
+  return { times, names, cols };
+}
+
+function buildCards() {
+  $('plots').innerHTML = '';
+  const used = new Set();
+  GROUPS.forEach(g => {
+    g.cols = data.names.filter(n => !used.has(n) && g.match(n));
+    g.cols.forEach(n => used.add(n));
+    // hide columns that are entirely empty
+    g.cols = g.cols.filter(n => data.cols[n].some(v => v !== null));
+    if (!g.cols.length) return;
+    const card = document.createElement('div');
+    card.className = 'card' + (g.collapsible && minimized.has(g.id) ? ' min' : '');
+    card.id = 'card-' + g.id;
+    g.color = {};
+    g.cols.forEach((n, i) => g.color[n] = PALETTE[i] || '#8b98a8');
+    const minBtn = g.collapsible ? `<button class="min-btn" data-min="${g.id}"></button>` : '';
+    const tiles = g.cols.map(n => `<div class="tile${hiddenTraces.has(n) ? ' off' : ''}" id="tile-${n}"
+        data-trace="${n}" title="Click to show/hide this trace"><div class="name">
+        <span class="sw" style="background:${g.color[n]}"></span>${n.replace(/_/g, ' ')}</div>
+        <div class="val"><span>–</span>${g.unit ? `<small>${g.unit}</small>` : ''}</div></div>`).join('');
+    card.innerHTML = `<div class="card-head">${minBtn}<h2>${g.title}${g.unit ? `<span class="unit">[${g.unit}]</span>` : ''}</h2>
+      <span class="spacer"></span><button class="${g.log ? 'on' : ''}" data-log="${g.id}">Log y</button></div>
+      <div class="tiles">${tiles}</div><div class="plot" id="plot-${g.id}"></div>`;
+    $('plots').appendChild(card);
+  });
+  document.querySelectorAll('[data-log]').forEach(b => b.onclick = () => {
+    const g = GROUPS.find(g => g.id === b.dataset.log);
+    g.log = !g.log; b.classList.toggle('on', g.log);
+    draw();  // redraw so the y range is refitted for the new scale
+  });
+  document.querySelectorAll('[data-trace]').forEach(t => t.onclick = () => {
+    const n = t.dataset.trace;
+    hiddenTraces.has(n) ? hiddenTraces.delete(n) : hiddenTraces.add(n);
+    localStorage.setItem('hiddenTraces', JSON.stringify([...hiddenTraces]));
+    t.classList.toggle('off', hiddenTraces.has(n));
+    draw();
+  });
+  document.querySelectorAll('[data-min]').forEach(b => {
+    const id = b.dataset.min;
+    const sync = () => {
+      const min = minimized.has(id);
+      $('card-' + id).classList.toggle('min', min);
+      b.textContent = min ? '+' : '–';
+      b.title = min ? 'Show plot' : 'Minimize plot';
+      $('card-' + id).querySelector('[data-log]').style.display = min ? 'none' : '';
+    };
+    sync();
+    b.onclick = () => {
+      minimized.has(id) ? minimized.delete(id) : minimized.add(id);
+      localStorage.setItem('minimized', JSON.stringify([...minimized]));
+      sync();
+      if (!minimized.has(id)) draw();  // plots are not drawn while hidden
+    };
+  });
+}
+
+// y range fitted to just the shown traces inside the selected time window (Plotly's own autorange
+// would fit all loaded data, so a 1 h view could be squashed by the 24 h extremes).
+function yRange(g) {
+  const xr = xRange(), lo = xr ? xr[0] : '', hi = xr ? xr[1] : '\uffff';
+  let min = Infinity, max = -Infinity;
+  g.cols.forEach(n => {
+    if (hiddenTraces.has(n)) return;
+    const ys = data.cols[n];
+    data.times.forEach((t, i) => {
+      const v = ys[i];
+      if (t < lo || t > hi || v === null || !Number.isFinite(v) || (g.log && v <= 0)) return;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    });
+  });
+  if (min === Infinity) return undefined;  // nothing to fit: let Plotly decide
+  if (g.log) {
+    let a = Math.log10(min), b = Math.log10(max);
+    const pad = Math.max((b - a) * 0.05, 0.02);
+    return [a - pad, b + pad];  // log axes take log10 units
+  }
+  const pad = max > min ? (max - min) * 0.05 : Math.max(Math.abs(max) * 0.05, 0.001);
+  return [min - pad, max + pad];
+}
+
+function xRange() {
+  if (!hours || !data.times.length) return undefined;
+  const end = new Date(data.times[data.times.length - 1]);
+  const start = new Date(end - hours * 3600e3);
+  const iso = d => new Date(d - d.getTimezoneOffset() * 60e3).toISOString().slice(0, 19);
+  return [iso(start), iso(end)];
+}
+
+// Scientific notation, 3 significant figures (as the logger writes pressures): 742 -> 7.42e+2.
+function fmtSci(v) {
+  if (v === null || v === undefined) return '–';
+  return v.toExponential(2);  // JS already writes e+2 / e-5 without padding
+}
+
+function fmt(v) {
+  if (v === null || v === undefined) return '–';
+  // up to 4 significant figures; tiny/huge values (pressures) in scientific notation
+  if (v !== 0 && (Math.abs(v) < 1e-3 || Math.abs(v) >= 1e5)) return v.toExponential(3).replace(/\.?0+e/, 'e');
+  return String(+v.toPrecision(4));
+}
+
+// Pulse pre-cooling: mixture still in the circuit (Low_Side above 1 mbar) while the 4K plate is below 10 K.
+// The MXC warms during this phase, so it gets its own status instead of "Too cold · do not open".
+const PRECOOL = { pressure: 'Low_Side', aboveMbar: 1, plate: '4K_Plate', belowK: 10 };
+// Fridge stages by MXC temperature, checked first to last (the first match wins):
+//   MXC below 1 K                         -> COLD - In Normal Circulation Mode
+//   MXC below 4 K and High_Side > 100 mbar -> Condensing Helium
+//   then PRECOOL above, then the MXC trend.
+const CIRCULATING_BELOW_K = 1;
+const CONDENSING = { belowK: 4, pressure: 'High_Side', aboveMbar: 100 };
+function latest(name) {
+  const ys = data.cols[name];
+  return ys && ys.length ? ys[ys.length - 1] : null;
+}
+
+// Green when every temperature is above the room dew point. Otherwise blue, worded by the MXC trend:
+// warming -> do not open, cooling -> cooling down, steady below BASE_MAX_K -> base temp.
+function drawDewStatus() {
+  const bar = $('dew'), g = GROUPS[0], last = data.times.length - 1;
+  const where = `room dew point ${DEW_K} K (${(DEW_K - 273.15).toFixed(1)} °C)`;
+  const say = (title, detail) => { $('dew-title').textContent = title; $('dew-detail').textContent = detail; };
+  document.querySelectorAll('.tile.cold').forEach(t => t.classList.remove('cold'));
+  // Blue edge on every temperature tile at/below the dew point, skipped channels included (display only).
+  (g.cols || []).forEach(n => {
+    const v = last < 0 ? null : data.cols[n][last];
+    if (v !== null && v <= DEW_K && $('tile-' + n)) $('tile-' + n).classList.add('cold');
+  });
+  const temps = (g.cols || []).filter(n => !DEW_SKIP.includes(n))
+    .map(n => [n, last < 0 ? null : data.cols[n][last]]);
+  const missing = temps.filter(([, v]) => v === null).map(([n]) => n);
+  const cold = temps.filter(([, v]) => v !== null && v <= DEW_K);
+  bar.className = '';
+  if (!temps.length) { say('No temperature readings', ''); return; }
+  if (cold.length) {
+    bar.className = 'cold';
+    const tr = mxcTrend(), coldList = `${cold.map(([n, v]) => `${n} ${fmt(v)} K`).join(', ')} at or below ${where}`;
+    const mxc = tr ? `MXC ${fmt(tr.T)} K` : 'MXC no reading';
+    const low = latest(PRECOOL.pressure), plate = latest(PRECOOL.plate);
+    const trend = tr && tr.rate !== undefined && tr.state !== 'unknown' ? `, ${fmtRate(tr.rate)}` : '';
+    const high = latest(CONDENSING.pressure);
+    if (tr && tr.T !== null && tr.T < CIRCULATING_BELOW_K) {
+      say('COLD - In Normal Circulation Mode', `${mxc}${trend}`);
+    } else if (tr && tr.T !== null && tr.T < CONDENSING.belowK && high !== null && high > CONDENSING.aboveMbar) {
+      say('Condensing Helium', `${CONDENSING.pressure} ${fmtSci(high)} mbar · ${mxc}${trend}`);
+    } else if (low !== null && plate !== null && low > PRECOOL.aboveMbar && plate < PRECOOL.belowK) {
+      say('Pulse Pre Cooling', `${PRECOOL.pressure} ${fmtSci(low)} mbar, ${PRECOOL.plate} ${fmt(plate)} K · ${mxc}${trend}`);
+    } else if (!tr || tr.state === 'unknown') {
+      say('Too cold · do not open', `${mxc}, no ${RATE_COL} in the latest row · ${coldList}`);
+    } else if (tr.state === 'warming') {
+      say('Too cold · do not open', `Warming: ${mxc}, ${fmtRate(tr.rate)} · ${coldList}`);
+    } else if (tr.state === 'cooling') {
+      say('Cooling down', `${mxc}, ${fmtRate(tr.rate)}`);
+    } else if (tr.T <= BASE_MAX_K) {
+      say('Now at base temp', `${mxc}, steady (${fmtRate(tr.rate)})`);
+    } else {
+      say(`Holding steady at ${fmt(tr.T)} K`, `${mxc}, ${fmtRate(tr.rate)}; not base temperature (above ${BASE_MAX_K} K)`);
+    }
+  } else if (missing.length) {
+    say('Status unknown', `No reading for ${missing.join(', ')}; the rest are above ${where}`);
+  } else {
+    bar.className = 'ok';
+    say('OK to open', `All temperatures above ${where}`);
+  }
+}
+
+// Stretches with no data: a run of blank rows (failed reads) or a time jump > GAP_FACTOR x the usual
+// sample spacing (logger not running). Returned as [start, end] = last good sample before, first after.
+const GAP_FACTOR = 3;
+function findGaps() {
+  const ms = data.times.map(t => new Date(t).getTime());
+  const good = data.times.map((_, i) => data.names.some(n => data.cols[n][i] !== null && !Number.isNaN(data.cols[n][i])));
+  const steps = [];
+  for (let i = 1; i < ms.length; i++) steps.push(ms[i] - ms[i - 1]);
+  const dt = steps.length ? steps.slice().sort((a, b) => a - b)[steps.length >> 1] : 60e3;
+  const gaps = [];
+  let prev = -1, blank = false;
+  for (let i = 0; i < ms.length; i++) {
+    if (!good[i]) { blank = true; continue; }
+    if (prev >= 0 && (blank || ms[i] - ms[prev] > GAP_FACTOR * dt)) gaps.push([data.times[prev], data.times[i]]);
+    prev = i; blank = false;
+  }
+  if (prev >= 0 && blank) gaps.push([data.times[prev], data.times[ms.length - 1]]);  // still failing now
+  return gaps;
+}
+
+// Shaded bar over each gap, plus a dashed centre line so even a 1-minute gap shows in a 24 h view.
+function gapShapes(gaps) {
+  const shapes = [];
+  gaps.forEach(([a, b]) => {
+    const mid = new Date((new Date(a).getTime() + new Date(b).getTime()) / 2);
+    const midIso = new Date(mid - mid.getTimezoneOffset() * 60e3).toISOString().slice(0, 19);
+    shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: a, x1: b, y0: 0, y1: 1, layer: 'below',
+                  fillcolor: 'rgba(230,103,103,0.10)', line: { width: 0 } });
+    shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: midIso, x1: midIso, y0: 0, y1: 1, layer: 'below',
+                  line: { color: 'rgba(230,103,103,0.55)', width: 1, dash: 'dot' } });
+  });
+  return shapes;
+}
+
+// Once the 4K plate is at/below 10 K, hide the 50K plate trace; show it again if the 4K plate warms back up.
+// It's hidden once on the way down, so clicking the 50K tile still brings it back by hand.
+const AUTO_HIDE = { trace: '50K_Plate', when: '4K_Plate', belowK: 10 };
+function autoHideTrace() {
+  const ys = data.cols[AUTO_HIDE.when];
+  if (!ys) return;
+  let i = ys.length - 1;
+  while (i >= 0 && ys[i] === null) i--;
+  if (i < 0) return;
+  const cold = ys[i] <= AUTO_HIDE.belowK, did = localStorage.getItem('autoHid') === AUTO_HIDE.trace;
+  if (cold && !did) {
+    hiddenTraces.add(AUTO_HIDE.trace);
+    localStorage.setItem('autoHid', AUTO_HIDE.trace);
+  } else if (!cold && did) {
+    hiddenTraces.delete(AUTO_HIDE.trace);
+    localStorage.removeItem('autoHid');
+  } else return;
+  localStorage.setItem('hiddenTraces', JSON.stringify([...hiddenTraces]));
+  const t = $('tile-' + AUTO_HIDE.trace);
+  if (t) t.classList.toggle('off', hiddenTraces.has(AUTO_HIDE.trace));
+}
+
+const phone = matchMedia('(max-width: 640px)');
+phone.addEventListener('change', () => { pinStatus(); if (data) draw(); });
+function pinStatus() {
+  const h = document.querySelector('header');
+  h.style.top = phone.matches ? -($('dew').offsetTop - 6) + 'px' : '';
+}
+new ResizeObserver(pinStatus).observe(document.querySelector('.bar'));  // re-pin whenever the controls change height
+
+function draw() {
+  autoHideTrace();
+  const small = phone.matches;
+  const gaps = findGaps();
+  const text = css('--muted'), grid = css('--grid'), axis = css('--line'), mono = css('--mono');
+  GROUPS.forEach(g => {
+    const el = $('plot-' + g.id);
+    if (!el) return;
+    const last = data.times.length - 1;
+    g.cols.forEach(n => {
+      const t = $('tile-' + n);
+      if (t) t.querySelector('.val span').textContent = last < 0 ? '–' : (g.sci ? fmtSci : fmt)(data.cols[n][last]);
+    });
+    if (minimized.has(g.id)) return;  // hidden: keep the latest values, skip the plot
+    const traces = g.cols.map(n => ({
+      // SVG 'scatter' rather than WebGL 'scattergl': only it can draw a spline through the samples
+      x: data.times, y: data.cols[n], name: n, type: 'scatter', mode: 'lines',
+      line: { color: g.color[n], width: 2, shape: 'spline' }, visible: !hiddenTraces.has(n),
+      connectgaps: true,  // join across missing data; gaps are marked with bars instead
+      hovertemplate: (g.sci ? '%{y:.2e}' : '%{y:.4~g}') + '<extra>' + n + '</extra>',
+    }));
+    const layout = {
+      margin: small ? { l: 46, r: 6, t: 6, b: 34 } : { l: 64, r: 12, t: 8, b: 40 },
+      // on phones a one-finger drag scrolls the page instead of zooming; tap a line to read values
+      dragmode: small ? false : 'zoom', paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0.18)',
+      font: { color: text, size: small ? 10 : 11, family: mono }, hovermode: 'x unified',
+      hoverlabel: { bgcolor: '#0d131b', bordercolor: axis, font: { family: mono, color: '#e6edf3' } },
+      showlegend: false,  // the tiles above act as the legend
+      xaxis: { gridcolor: grid, linecolor: axis, zeroline: false, range: xRange(), autorange: !hours, nticks: small ? 4 : 0, fixedrange: small,  // phones: no tap/pinch zoom
+               showspikes: true, spikemode: 'across', spikethickness: 1, spikecolor: '#38bdf8', spikedash: 'dot' },
+      yaxis: { gridcolor: grid, linecolor: axis, zeroline: false, type: g.log ? 'log' : 'linear', exponentformat: 'power', fixedrange: small,
+               ...(yr => yr ? { range: yr, autorange: false } : { autorange: true })(yRange(g)) },
+      shapes: gapShapes(gaps),
+      uirevision: g.id + hours + g.log,  // keep the user's zoom across auto-refreshes; new window or scale refits
+    };
+    Plotly.react(el, traces, layout, { responsive: true, displaylogo: false, displayModeBar: small ? false : 'hover',
+                                          doubleClick: small ? false : 'reset+autosize' });
+  });
+  drawDewStatus();  // after the tiles exist, so it can flag the cold ones
+}
+
+async function loadFiles() {
+  // Python server: api/files. Static copy (GitHub Pages): files.json written by publish_page.py.
+  // Relative URLs, so the page also works under https://<user>.github.io/<repo>/.
+  let r = await fetch('api/files', { cache: 'no-store' }).catch(() => null);
+  if (!r || !r.ok) r = await fetch('files.json?t=' + Date.now(), { cache: 'no-store' });
+  const files = await r.json();
+  const sel = $('files'), prev = new Set([...sel.selectedOptions].map(o => o.value));
+  sel.innerHTML = '';
+  files.forEach(f => sel.add(new Option(f.name, f.name)));
+  sel.size = phone.matches ? 1 : Math.min(Math.max(files.length, 2), 5);
+  // keep the previous selection; default to the rolling 24 h log, else the newest dated log
+  const opts = [...sel.options];
+  if (prev.size) opts.forEach(o => o.selected = prev.has(o.value));
+  const rolling = opts.find(o => o.value === 'fridge_log_last24h.csv');
+  if (!sel.selectedOptions.length && rolling) rolling.selected = true;
+  if (!sel.selectedOptions.length && opts.length) {
+    const dated = opts.filter(o => /^fridge_log_\d{6}\.csv$/.test(o.value));
+    (dated.length ? dated : opts)[(dated.length ? dated : opts).length - 1].selected = true;
+  }
+}
+
+async function loadData() {
+  const names = [...$('files').selectedOptions].map(o => o.value);
+  if (!names.length) { $('plots').innerHTML = '<p class="empty">No log files selected.</p>'; return; }
+  $('status').textContent = 'Loading…';
+  try {
+    const texts = await Promise.all(names.map(n => fetch('log/' + encodeURIComponent(n) + '?t=' + Date.now(), { cache: 'no-store' }).then(r => r.text())));
+    const prevNames = data ? data.names.join() : '';
+    data = merge(texts.map(parseCSV));
+    if (data.names.join() !== prevNames || !document.querySelector('.plot')) buildCards();
+    draw();
+    const last = data.times[data.times.length - 1] || '–';
+    const now = new Date().toLocaleTimeString([], { hour12: false });
+    $('status').textContent = phone.matches  // phones: short enough for one line
+      ? `last data point ${last.slice(11) || '–'} · checked ${now}`
+      : `${data.times.length} samples · last data point ${last.replace('T', ' ')} · checked ${now}`;
+  } catch (e) {
+    $('status').textContent = 'Load failed: ' + e;
+  }
+}
+
+async function refresh() { await loadFiles(); await loadData(); }
+
+function setAuto(on) {
+  clearInterval(autoTimer);
+  $('auto').classList.toggle('on', on);
+  $('live').classList.toggle('off', !on);
+  if (on) autoTimer = setInterval(refresh, REFRESH_MS);
+}
+
+$('files').onchange = loadData;
+$('reload').onclick = refresh;
+$('auto').onclick = () => setAuto(!$('auto').classList.contains('on'));
+document.querySelectorAll('#ranges button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#ranges button').forEach(x => x.classList.toggle('on', x === b));
+  hours = Number(b.dataset.h);
+  if (data) draw();
+});
+
+const tick = () => $('clock').textContent = new Date().toLocaleTimeString([], { hour12: false });
+tick(); setInterval(tick, 1000);
+refresh();
+setAuto(true);
+</script>
+</body>
+</html>
